@@ -249,6 +249,8 @@ pub struct Root(
 * ✅ Rust + JSON Schema emitters
 * 🔧 Future: richer pattern detection, semantic type hints, optional list bound enforcement
 
+The corresponding rust data-models as a rust crate can be found: [github.com/colbyn/autogen-serp-types](https://github.com/colbyn/autogen-serp-types).
+
 ---
 
 ## License

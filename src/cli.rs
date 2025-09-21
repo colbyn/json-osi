@@ -1,6 +1,10 @@
 //! Minimal CLI: infer → (schema | rust)
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand, Args};
+use rayon::prelude::*;
+use serde_json::Value;
+
+use crate::inference::{U, observe_value, join, normalize};
 
 // ————————————————————————————————————————————————————————————————————————————
 // TYPES
@@ -19,6 +23,8 @@ enum Command {
     Schema(JsonSchemaOut),
     /// infer and emit a strict Rust data model
     Rust(RustOut),
+    /// Pre-processing CLI helpers
+    PreProcess(PreProcess)
 }
 
 #[derive(Args, Debug, Clone)]
@@ -42,6 +48,21 @@ struct InputSettings {
     input: Vec<String>,
 }
 
+#[derive(Args, Debug, Clone)]
+struct CommonSettings {
+    /// Debugging: print CLI invocation settings and then terminate
+    #[arg(long)]
+    no_op: bool,
+    
+    /// Debugging: track elapsed time and then print to stdout
+    #[arg(long)]
+    track_time: bool,
+
+    /// Debugging: disable parallelization
+    #[arg(long)]
+    no_parallel: bool,
+}
+
 #[derive(clap::Parser, Debug)]
 struct JsonSchemaOut {
     #[command(flatten)]
@@ -51,9 +72,8 @@ struct JsonSchemaOut {
     #[arg(short, long)]
     out: Option<PathBuf>,
 
-    /// debugging
-    #[arg(long)]
-    no_op: bool,
+    #[command(flatten)]
+    common_settings: CommonSettings,
 }
 
 
@@ -70,9 +90,25 @@ struct RustOut {
     #[arg(short, long)]
     out: Option<PathBuf>,
 
-    /// debugging
-    #[arg(long)]
-    no_op: bool,
+    #[command(flatten)]
+    common_settings: CommonSettings,
+}
+
+#[derive(clap::Parser, Debug)]
+struct PreProcess {
+    // #[command(flatten)]
+    // input_settings: InputSettings,
+
+    // /// top-level Rust type name
+    // #[arg(long, default_value = "Root")]
+    // root_type: String,
+
+    // /// 
+    // #[arg(short, long)]
+    // out: Option<PathBuf>,
+
+    // #[command(flatten)]
+    // common_settings: CommonSettings,
 }
 
 // ————————————————————————————————————————————————————————————————————————————
@@ -80,7 +116,7 @@ struct RustOut {
 // ————————————————————————————————————————————————————————————————————————————
 
 impl InputSettings {
-    fn load_process(&self, mut apply: impl FnMut(serde_json::Value)) {
+    fn load_process(&self, mut apply: impl FnMut(&Path, serde_json::Value)) {
         let source_paths = resolve_file_path_patterns(&self.input).expect(
             "failed to resolve input file paths"
         );
@@ -102,7 +138,7 @@ impl InputSettings {
             };
             match self.jq_expr.as_ref() {
                 None => {
-                    apply(json_value)
+                    apply(&source_path, json_value)
                 },
                 Some(jq_expr) => {
                     let result = crate::jq_exec::run_jaq(jq_expr, &json_value);
@@ -120,7 +156,7 @@ impl InputSettings {
                                 panic!("Failed to parse JSON source file ({source_path_str}): {error}");
                             }
                         };
-                        apply(json_value)
+                        apply(&source_path, json_value)
                     }
                 }
             }
@@ -133,22 +169,32 @@ impl CommandLineInterface {
         Self::parse()
     }
     pub fn run(&self) {
+        let start = std::time::Instant::now();
+        let mut print_elapsed_time = false;
+
         match &self.cmd {
             Command::Schema(target) => {
-                // debug path
-                if target.no_op {
+                // - DEBUG PATH -
+                if target.common_settings.no_op {
+                    let mut sources = Vec::<PathBuf>::new();
+                    target.input_settings.load_process(|source_path, _| {
+                        sources.push(source_path.to_path_buf());
+                    });
                     eprintln!("{self:#?}");
+                    eprintln!("RESOLVED SOURCES:");
+                    for source in sources {
+                        eprintln!("\t- {}", source.to_string_lossy());
+                    }
                     return
                 }
+                if target.common_settings.track_time {
+                    print_elapsed_time = true;
+                }
 
-                // 1) build state
-                let mut inf = crate::inference::Inference::new();
-                target.input_settings.load_process(|value| {
-                    inf.observe_value(&value);
-                });
-                
-                // 3) solve & generate schema
-                let u = inf.solve();
+                // - BUILD STATE -
+                let u = compute_merge_summary(&target.input_settings, &target.common_settings);
+
+                // COMPUTE FINALIZED SCHEMA
                 let schema = crate::inference::emit_schema(&u);
                 let schema_src = serde_json::to_string_pretty(&schema).unwrap();
                 if let Some(out) = target.out.as_ref() {
@@ -161,23 +207,30 @@ impl CommandLineInterface {
                 }
             }
             Command::Rust(target) => {
-                // debug path
-                if target.no_op {
+                // DEBUG PATH
+                if target.common_settings.no_op {
+                    let mut sources = Vec::<PathBuf>::new();
+                    target.input_settings.load_process(|source_path, _| {
+                        sources.push(source_path.to_path_buf());
+                    });
                     eprintln!("{self:#?}");
+                    eprintln!("RESOLVED SOURCES:");
+                    for source in sources {
+                        eprintln!("\t- {}", source.to_string_lossy());
+                    }
                     return
                 }
+                if target.common_settings.track_time {
+                    print_elapsed_time = true;
+                }
                 
-                // 1) build state
-                let mut inf = crate::inference::Inference::new();
-                target.input_settings.load_process(|value| {
-                    inf.observe_value(&value);
-                });
-                let u = inf.solve();
+                // - BUILD STATE -
+                let u = compute_merge_summary(&target.input_settings, &target.common_settings);
                 
-                // 2) lower to typed IR
+                // - LOWER TO TYPED IR -
                 let ir_root = crate::lower::lower_to_ir(&u);
                 
-                // 3) generate strict Rust types
+                // - GENERATE STRICT RUST TYPES -
                 let mut cg = crate::codegen::Codegen::new();
                 cg.emit(&ir_root, "Root");
                 let rust_src = cg.into_string();
@@ -191,9 +244,107 @@ impl CommandLineInterface {
                     println!("{rust_src}");
                 }
             }
+            Command::PreProcess(target) => {
+                let _ = target; // TODO
+            }
+        }
+
+        if print_elapsed_time {
+            let elapsed = start.elapsed();
+            eprintln!("inference took {}", format_duration(elapsed));
         }
     }
 }
+
+fn compute_merge_summary(input_settings: &InputSettings, common_settings: &CommonSettings) -> U {
+    if common_settings.no_parallel {
+        let mut inf = crate::inference::Inference::new();
+        input_settings.load_process(|_, value| {
+            inf.observe_value(&value);
+        });
+        let u = inf.solve();
+        return u
+    }
+
+    // 1) resolve paths (same behavior as your sequential path)
+    let source_paths = resolve_file_path_patterns(&input_settings.input)
+        .expect("failed to resolve input file paths");
+
+    let ndjson = input_settings.ndjson;
+    let jq_expr = input_settings.jq_expr.clone();
+    let json_ptr = input_settings.json_pointer.clone();
+
+    // 2) MAP (parallel): per-file local summary
+    let combined = source_paths.par_iter()
+        .map(|path| {
+            let path_str = path.to_string_lossy().to_string();
+            let src = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("read failed ({path_str}): {e}"));
+
+            let mut acc = U::empty();
+
+            // helper: apply jq (if any), yielding 0+ JSON values
+            let mut apply_one = |v: &Value| {
+                let vals: Vec<Value> = match jq_expr.as_ref() {
+                    None => vec![v.clone()],
+                    Some(expr) => {
+                        let out = crate::jq_exec::run_jaq(expr, v)
+                            .unwrap_or_else(|e| panic!("jq failed ({path_str}): {e}"));
+                        out.into_iter()
+                           .map(|t| serde_json::from_str::<Value>(&t)
+                                .unwrap_or_else(|e| panic!("jq output not JSON ({path_str}): {e}\n{t}")))
+                           .collect()
+                    }
+                };
+
+                for pv in vals {
+                    // JSON Pointer: if it selects an array, expand; else take the node
+                    if let Some(ptr) = json_ptr.as_ref() {
+                        match pv.pointer(ptr.as_str()) {
+                            None => { /* zero samples at this file for this node */ }
+                            Some(Value::Array(xs)) => {
+                                for sub in xs {
+                                    let obs = observe_value(sub);
+                                    acc = join(&acc, &obs);
+                                }
+                            }
+                            Some(other) => {
+                                let obs = observe_value(other);
+                                acc = join(&acc, &obs);
+                            }
+                        }
+                    } else {
+                        let obs = observe_value(&pv);
+                        acc = join(&acc, &obs);
+                    }
+                }
+            };
+
+            if ndjson {
+                for (i, line) in src.lines().enumerate() {
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    let v: Value = serde_json::from_str(line)
+                        .unwrap_or_else(|e| panic!("NDJSON parse error {path_str}:{}: {e}\n{line}", i+1));
+                    apply_one(&v);
+                }
+            } else {
+                let root: Value = serde_json::from_str(&src)
+                    .unwrap_or_else(|e| panic!("JSON parse error ({path_str}): {e}"));
+                apply_one(&root);
+            }
+
+            acc
+        })
+        // 3) REDUCE (parallel): merge thread-local summaries
+        .reduce(|| U::empty(), |a, b| join(&a, &b));
+
+    // 4) normalize once at the end (same as Inference::solve)
+    let mut u = combined;
+    normalize(&mut u);
+    u
+}
+
 
 // ————————————————————————————————————————————————————————————————————————————
 // INTERNAL HELPERS
@@ -238,3 +389,16 @@ where
 
     Ok(out)
 }
+
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m {}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
+
