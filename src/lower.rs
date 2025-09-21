@@ -45,13 +45,13 @@ fn lower_core(u: &U) -> Ty {
         }
     }
 
-    if let Some(strc) = &u.str_ {
-        let pattern = strc.lcp.as_ref().and_then(|p| {
+    if let Some(str_c) = &u.str_ {
+        let pattern = str_c.lcp.as_ref().and_then(|p| {
             if p.len() >= LCP_MIN_FOR_PATTERN { Some(format!(r"^{}.*", crate::inference::escape_regex(p))) } else { None }
         });
-        let mut enum_: Vec<String> = strc.lits.iter().cloned().collect();
+        let mut enum_: Vec<String> = str_c.lits.iter().cloned().collect();
         enum_.sort();
-        arms.push(Ty::String { enum_, pattern, format_uri: strc.is_uri });
+        arms.push(Ty::String { enum_, pattern, format_uri: str_c.is_uri });
     }
 
     if u.has_bool {

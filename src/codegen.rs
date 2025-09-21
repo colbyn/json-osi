@@ -143,8 +143,8 @@ impl<'de> Deserialize<'de> for Null {
                 let mut var_names = Vec::new();
                 let mut arm_types = Vec::new();
                 for (i, a) in arms.iter().enumerate() {
-                    let vname = format!("V{}", i);
-                    var_names.push(vname);
+                    let v_name = format!("V{}", i);
+                    var_names.push(v_name);
                     arm_types.push(self.walk(
                         a,
                         &mut path_with(path, i),
