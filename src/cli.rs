@@ -50,6 +50,10 @@ struct JsonSchemaOut {
     /// output .json file (stdout if omitted)
     #[arg(short, long)]
     out: Option<PathBuf>,
+
+    /// debugging
+    #[arg(long)]
+    no_op: bool,
 }
 
 
@@ -65,6 +69,10 @@ struct RustOut {
     /// output .rs file (stdout if omitted)
     #[arg(short, long)]
     out: Option<PathBuf>,
+
+    /// debugging
+    #[arg(long)]
+    no_op: bool,
 }
 
 // ————————————————————————————————————————————————————————————————————————————
@@ -127,10 +135,19 @@ impl CommandLineInterface {
     pub fn run(&self) {
         match &self.cmd {
             Command::Schema(target) => {
+                // debug path
+                if target.no_op {
+                    eprintln!("{self:#?}");
+                    return
+                }
+
+                // 1) build state
                 let mut inf = crate::inference::Inference::new();
                 target.input_settings.load_process(|value| {
                     inf.observe_value(&value);
                 });
+                
+                // 3) solve & generate schema
                 let u = inf.solve();
                 let schema = crate::inference::emit_schema(&u);
                 let schema_src = serde_json::to_string_pretty(&schema).unwrap();
@@ -144,6 +161,12 @@ impl CommandLineInterface {
                 }
             }
             Command::Rust(target) => {
+                // debug path
+                if target.no_op {
+                    eprintln!("{self:#?}");
+                    return
+                }
+                
                 // 1) build state
                 let mut inf = crate::inference::Inference::new();
                 target.input_settings.load_process(|value| {
