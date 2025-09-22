@@ -1,4 +1,4 @@
-use crate::inference::{U, tuple_min_items}; // tuple_min_items you added in emitter
+use crate::inference::{tuple_min_items_arr, U};
 use crate::ir::{Ty, Field};
 
 fn is_exact_null(u: &crate::inference::U) -> bool {
@@ -61,13 +61,13 @@ fn lower_core(u: &U) -> Ty {
     if let Some(arr) = &u.arr {
         if !arr.cols.is_empty() {
             let elems = arr.cols.iter().map(lower_to_ir).collect::<Vec<_>>();
-            let max_items = arr.cols.len() as u32;
 
             // 🚩 if exact arity was proven during inference, enforce it here
+            let max_items = arr.cols.len() as u32;
             let min_items = if arr.len_min == arr.len_max && arr.len_max > 0 {
                 max_items
             } else {
-                tuple_min_items(&arr.cols)
+                tuple_min_items_arr(arr)
             };
 
             arms.push(Ty::ArrayTuple { elems, min_items, max_items });

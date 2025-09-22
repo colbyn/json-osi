@@ -503,7 +503,7 @@ pub fn emit_schema(u: &U) -> serde_json::Value {
             let min_items = if arr.len_min == arr.len_max && arr.len_max > 0 {
                 max_items
             } else {
-                tuple_min_items(&arr.cols)
+                tuple_min_items_arr(arr)
             };
 
             arms.push(serde_json::json!({
@@ -667,16 +667,28 @@ fn is_exact_null(u: &U) -> bool {
         && u.obj.is_none()
 }
 
-pub fn tuple_min_items(cols: &[U]) -> u32 {
-    // last index that is required: either non-nullable OR exactly-null
+// pub fn tuple_min_items(cols: &[U]) -> u32 {
+//     // last index that is required: either non-nullable OR exactly-null
+//     let mut last_req: i32 = -1;
+//     for (i, c) in cols.iter().enumerate() {
+//         if !c.nullable || is_exact_null(c) {
+//             last_req = i as i32;
+//         }
+//     }
+//     if last_req < 0 { 0 } else { (last_req as u32) + 1 }
+// }
+
+pub fn tuple_min_items_arr(arr: &ArrC) -> u32 {
     let mut last_req: i32 = -1;
-    for (i, c) in cols.iter().enumerate() {
-        if !c.nullable || is_exact_null(c) {
+    for i in 0..arr.cols.len() {
+        let present = *arr.present.get(i).unwrap_or(&0);
+        if present == arr.samples {
             last_req = i as i32;
         }
     }
     if last_req < 0 { 0 } else { (last_req as u32) + 1 }
 }
+
 
 
 

@@ -4,6 +4,7 @@ pub mod lower;
 pub mod codegen;
 pub mod cli;
 pub mod jq_exec;
+pub mod path_de;
 
 use serde_json::{json, Value};
 
