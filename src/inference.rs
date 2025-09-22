@@ -406,57 +406,32 @@ fn kind_sig(u: &U) -> (bool, bool, bool, bool, bool) {
     (u.has_bool, u.num.is_some(), u.str_.is_some(), u.arr.is_some(), u.obj.is_some())
 }
 
-/// Return true if tuple evidence is strong enough to keep.
+/// Return true if we have *proof* this is a tuple:
+///  - exact arity (all arrays same length), or
+///  - at least one position is an exact-null pad across all samples.
 fn decide_tuple(arr: &ArrC) -> bool {
-    if arr.samples < 2 { return false; } // need at least 2 arrays for structure
+    if arr.samples < 2 { return false; }
     if arr.cols.is_empty() { return false; }
 
+    // Proof 1: every observed array had the same length
+    if arr.len_min == arr.len_max && arr.len_max > 0 {
+        return true;
+    }
+
+    // Proof 2: exact-null pad in some column
     let n = arr.cols.len();
-    let item_sig = kind_sig(&arr.item);
-
-    let mut strong = 0usize;
-
     for i in 0..n {
-        let col = &arr.cols[i];
-        let present = *arr.present.get(i).unwrap_or(&0);
+        let present  = *arr.present.get(i).unwrap_or(&0);
         let non_null = *arr.non_null.get(i).unwrap_or(&0);
-
-        // exact-null pad → very strong tuple signal
         if present == arr.samples && non_null == 0 {
-            strong += 1;
-            continue;
-        }
-
-        // required-ish column (present in most arrays) vs others sparse
-        if present * 10 >= arr.samples * 9 && present != arr.samples { // ≥90% present but not always
-            strong += 1;
-        }
-
-        // type divergence vs pooled item
-        if kind_sig(col) != item_sig {
-            strong += 1;
-        }
-
-        // numeric overlap test (per-position vs pooled)
-        if let (Some(ci), Some(ii)) = (&col.num, &arr.item.num) {
-            let ov = interval_overlap_fraction(ci.min_f64.0, ci.max_f64.0, ii.min_f64.0, ii.max_f64.0);
-            if ov < 0.3 { strong += 1; }
-        }
-
-        // string pattern divergence (different LCP than pooled)
-        if let (Some(cs), Some(is)) = (&col.str_, &arr.item.str_) {
-            if let (Some(c_lcp), Some(i_lcp)) = (&cs.lcp, &is.lcp) {
-                if !c_lcp.is_empty() && !i_lcp.is_empty() && c_lcp != i_lcp {
-                    strong += 1;
-                }
-            }
+            return true;
         }
     }
 
-    // If we saw any strong position signals AND at least one position looks “structured”,
-    // keep tuple. Thresholds can be tuned; these work well empirically.
-    strong >= 1
+    // Otherwise, we have insufficient evidence → treat as homogeneous list.
+    false
 }
+
 
 
 // ------------------------------- Emission --------------------------------- //
@@ -524,8 +499,12 @@ pub fn emit_schema(u: &U) -> serde_json::Value {
     if let Some(arr) = &u.arr {
         if !arr.cols.is_empty() {
             // tuple via prefixItems — tuple-aware min/max
-            let min_items = tuple_min_items(&arr.cols);
             let max_items = arr.cols.len() as u32;
+            let min_items = if arr.len_min == arr.len_max && arr.len_max > 0 {
+                max_items
+            } else {
+                tuple_min_items(&arr.cols)
+            };
 
             arms.push(serde_json::json!({
                 "type": "array",
@@ -533,6 +512,7 @@ pub fn emit_schema(u: &U) -> serde_json::Value {
                 "minItems": min_items,
                 "maxItems": max_items
             }));
+
         } else {
             // homogeneous list — keep list-wise min/max
             arms.push(serde_json::json!({
@@ -749,19 +729,20 @@ mod tests {
         assert_eq!(str_c.lits.len(), 2);
     }
 
-    #[test]
-    fn arrays_tuple_optional_tail() {
-        let a = serde_json::json!([1, "x"]);
-        let b = serde_json::json!([2]);
-        let u = infer_from_values([&a, &b]);
-        let arr = u.arr.unwrap();
-        assert_eq!(arr.len_min, 1);
-        assert_eq!(arr.len_max, 2);
-        assert_eq!(arr.cols.len(), 2);
-        // column 0 has numbers, column 1 is nullable because it's missing in some samples
-        assert!(arr.cols[0].num.is_some());
-        assert!(arr.cols[1].nullable);
-    }
+    // TODO: BROKEN NEEDS UPDATE OR REMOVE
+    // #[test]
+    // fn arrays_tuple_optional_tail() {
+    //     let a = serde_json::json!([1, "x"]);
+    //     let b = serde_json::json!([2]);
+    //     let u = infer_from_values([&a, &b]);
+    //     let arr = u.arr.unwrap();
+    //     assert_eq!(arr.len_min, 1);
+    //     assert_eq!(arr.len_max, 2);
+    //     assert_eq!(arr.cols.len(), 2);
+    //     // column 0 has numbers, column 1 is nullable because it's missing in some samples
+    //     assert!(arr.cols[0].num.is_some());
+    //     assert!(arr.cols[1].nullable);
+    // }
 
     #[test]
     fn objects_merge_and_requiredness_non_null() {
@@ -889,4 +870,40 @@ mod tests {
         assert_eq!(outer_schema["maxItems"], 3);
     }
 
+    #[test]
+    fn arrays_tuple_decision_and_minitems_rules() {
+        use serde_json::json;
+        // A) Variable length, no pad => list
+        let a = json!([[1,"x"], [2]]);
+        let ua = crate::inference::infer_from_values(a.as_array().unwrap().iter());
+        {
+            let arr = ua.arr.as_ref().unwrap();
+            assert!(arr.cols.is_empty(), "variable length collapses to list");
+        }
+
+        // B) Exact-null pad => tuple with optional tail (min < max)
+        let b = json!([[1, null, "x"], [2, null]]);
+        let ub = crate::inference::infer_from_values(b.as_array().unwrap().iter());
+        {
+            let arr = ub.arr.as_ref().unwrap();
+            assert!(!arr.cols.is_empty(), "kept as tuple due to hard null pad");
+            let schema = crate::inference::emit_schema(&ub);
+            let tuple = schema.get("prefixItems").unwrap(); // root is array only
+            assert!(schema["minItems"].as_u64().unwrap() < schema["maxItems"].as_u64().unwrap());
+        }
+
+        // C) Exact arity => exact tuple (min == max)
+        let c = json!([[1, "x", null], [3, "y", null]]);
+        let uc = crate::inference::infer_from_values(c.as_array().unwrap().iter());
+        {
+            let arr = uc.arr.as_ref().unwrap();
+            assert_eq!(arr.len_min, arr.len_max, "exact arity proven");
+            let schema = crate::inference::emit_schema(&uc);
+            assert_eq!(schema["minItems"], schema["maxItems"], "fixed length enforced");
+        }
+    }
+
+
 }
+
+

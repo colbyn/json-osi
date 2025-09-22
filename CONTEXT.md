@@ -66,14 +66,15 @@ Strings
 - Keep **tiny, human-ish** enums (size/length thresholds); otherwise drop literals.
 - If LCP is strong (thresholded) or flagged URI, emit **pattern** / `format:"uri"`.
 
-Arrays – **Tuple vs List decision** (`decide_tuple`)
-- Need ≥ 2 arrays; signals for tuple include:
-  - **Exact-null pads** (present==samples && non_null==0).
-  - **Requiredness contrast** (≥90% present for some positions).
-  - **Kind divergence** between a column and the pooled `item`.
-  - **Numeric overlap** between per-position vs pooled intervals is weak.
-  - **String LCP divergence** between column vs pooled.
-- If signals weak → collapse to list (keep `item`; clear positional evidence).
+**Arrays – Tuple vs List (proof-only)**
+
+* **Default**: treat arrays as homogeneous lists with pooled `item` type.
+* **Upgrade to tuple** only if:
+
+  1. **Exact arity**: `len_min == len_max`, or
+  2. **Exact-null pad**: some column is present in all samples and always `null`.
+
+If upgraded and `min_items < max_items`, emit a **lenient tuple** deserializer that accepts `len_min..=len_max` and fills missing tail positions with `None`.
 
 Objects
 - Normalize fields recursively. `required` in IR uses `non_null_in == seen_objects`.

@@ -1,6 +1,6 @@
-use std::hash::{Hash, Hasher};
 use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crate::ir::{Field, Ty};
 
@@ -92,34 +92,127 @@ impl<'de> Deserialize<'de> for Null {
                 min_items,
                 max_items,
             } => {
-                // exact arity tuple struct; serde derive enforces exact length
                 let type_name = self.unique(&to_type_name(&hint));
-                let fields = elems
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| {
-                        let child_name =
-                            self.walk(e, &mut path_with(path, i), format!("{hint}{}", i));
-                        child_name
-                    })
-                    .collect::<Vec<_>>();
 
-                // doc with min/max
+                // 1) Materialize child type names
+                let mut fields = Vec::with_capacity(elems.len());
+                for (i, e) in elems.iter().enumerate() {
+                    let mut child = self.walk(e, &mut path_with(path, i), format!("{hint}{i}"));
+                    // For optional tail positions (i >= min_items), ensure the field type is Option<...>
+                    if (i as u32) >= *min_items && !is_option_type(&child) {
+                        child = format!("Option<{child}>");
+                    }
+                    fields.push(child);
+                }
+
+                // 2) Exact-arity tuples: derive Deserialize as before
+                if min_items == max_items {
+                    self.out.push_str(&format!(
+                        "/// tuple len={} (required first {} slots)\n",
+                        max_items, min_items
+                    ));
+                    self.out.push_str(&format!(
+                        "#[derive(Debug, Deserialize)]\npub struct {}(\n",
+                        type_name
+                    ));
+                    for f in &fields {
+                        self.out
+                            .push_str(&format!("    pub {},\n", wrap_tuple_field(f)));
+                    }
+                    self.out.push_str(");\n\n");
+                    return type_name;
+                }
+
+                // 3) Lenient tuples (optional tail): custom Deserialize
                 self.out.push_str(&format!(
-                    "/// tuple len={} (required first {} slots)\n",
-                    max_items, min_items
+                    "/// tuple len={} (required first {} slots); accepts {}..={} elements\n",
+                    max_items, min_items, min_items, max_items
                 ));
-                self.out.push_str(&format!(
-                    "#[derive(Debug, Deserialize)]\npub struct {}(\n",
-                    type_name
-                ));
+                self.out
+                    .push_str(&format!("#[derive(Debug)]\npub struct {}(\n", type_name));
                 for f in &fields {
                     self.out
                         .push_str(&format!("    pub {},\n", wrap_tuple_field(f)));
                 }
                 self.out.push_str(");\n\n");
+
+                // Custom visitor-based Deserialize
+                self.out.push_str(&format!(
+                    r#"impl<'de> serde::Deserialize<'de> for {name} {{
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {{
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {{
+            type Value = {name};
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {{
+                write!(f, "array of length {min}..={max}")
+            }}
+            fn visit_seq<A>(self, mut seq: A) -> Result<{name}, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {{
+"#,
+                    name = type_name,
+                    min = min_items,
+                    max = max_items
+                ));
+
+                // generate reads per slot
+                for (i, ty) in fields.iter().enumerate() {
+                    let idx = i as u32;
+                    let var = format!("a{i}");
+                    if idx < *min_items {
+                        // required position
+                        self.out.push_str(&format!(
+                "                let {var}: {ty} = match seq.next_element::<{ty}>()? {{\n\
+                 \tSome(v) => v,\n\
+                 \tNone => return Err(serde::de::Error::invalid_length({i}, &\"at least {min_items} elements\")),\n\
+                 }};\n",
+                var = var, ty = ty, i = i, min_items = min_items
+            ));
+                    } else {
+                        // optional tail position: missing → None
+                        if is_option_type(ty) {
+                            self.out.push_str(&format!(
+                    "                let {var}: {ty} = match seq.next_element::<{ty}>()? {{ Some(v) => v, None => None }};\n",
+                    var = var, ty = ty
+                ));
+                        } else {
+                            // Shouldn't happen because we wrapped, but keep a fallback
+                            self.out.push_str(&format!(
+                    "                let {var}: {ty} = seq.next_element::<{ty}>()? \
+                     .ok_or_else(|| serde::de::Error::invalid_length({i}, &\"missing required element\"))?;\n",
+                    var = var, ty = ty, i = i
+                ));
+                        }
+                    }
+                }
+
+                // guard against extra elements
+                self.out.push_str(
+        "                if let Some::<serde_json::Value>(_extra) = seq.next_element()? {\n\
+         \treturn Err(serde::de::Error::invalid_length(usize::MAX, &\"at most the declared number of elements\"));\n\
+         }\n"
+    );
+
+                // construct
+                self.out
+                    .push_str(&format!("                Ok({name}(\n", name = type_name));
+                for i in 0..fields.len() {
+                    self.out.push_str(&format!("                    a{i},\n"));
+                }
+                self.out.push_str("                ))\n");
+
+                // close visitor + impl
+                self.out.push_str(
+                    "            }\n        }\n        de.deserialize_seq(V)\n    }\n}\n\n",
+                );
+
                 type_name
             }
+
             Ty::Object { fields } => {
                 let type_name = self.unique(&to_type_name(&hint));
                 self.out.push_str("#[derive(Debug, Deserialize)]\n");
@@ -278,7 +371,8 @@ impl<'de> Deserialize<'de> for {nm} {{
 
             // Define enum
             self.out.push_str(&format!(
-                "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum {} {{\n", nm
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum {} {{\n",
+                nm
             ));
             for (ident, _) in &variants {
                 self.out.push_str(&format!("    {},\n", ident));
@@ -290,22 +384,26 @@ impl<'de> Deserialize<'de> for {nm} {{
                 "impl<'de> Deserialize<'de> for {nm} {{\n    fn deserialize<D>(de: D) -> Result<Self, D::Error> where D: Deserializer<'de> {{\n        let s = String::deserialize(de)?;\n        match s.as_str() {{\n"
             ));
             for (ident, lit) in &variants {
-                self.out.push_str(&format!("            {lit:?} => Ok({nm}::{ident}),\n"));
+                self.out
+                    .push_str(&format!("            {lit:?} => Ok({nm}::{ident}),\n"));
             }
-            self.out.push_str("            _ => Err(DeError::unknown_variant(&s, &[])),\n        }\n    }\n}\n");
+            self.out.push_str(
+                "            _ => Err(DeError::unknown_variant(&s, &[])),\n        }\n    }\n}\n",
+            );
 
             // (Optional but nice) Serialize back to the original literal
             self.out.push_str(&format!(
                 "impl serde::Serialize for {nm} {{\n    fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error> where S: serde::Serializer {{\n        match self {{\n"
             ));
             for (ident, lit) in &variants {
-                self.out.push_str(&format!("            {nm}::{ident} => ser.serialize_str({lit:?}),\n"));
+                self.out.push_str(&format!(
+                    "            {nm}::{ident} => ser.serialize_str({lit:?}),\n"
+                ));
             }
             self.out.push_str("        }\n    }\n}\n\n");
 
             return nm;
         }
-
 
         // ---------- pattern-checked newtype ----------
         if let Some(pat) = pattern {
@@ -417,14 +515,59 @@ fn f64_lit(x: f64) -> String {
 
 // Very small keyword set (covers Rust 2021). Add more if you like.
 fn is_rust_keyword(s: &str) -> bool {
-    matches!(s,
-        "as" | "break" | "const" | "continue" | "crate" | "else" | "enum" | "extern" |
-        "false" | "fn" | "for" | "if" | "impl" | "in" | "let" | "loop" | "match" |
-        "mod" | "move" | "mut" | "pub" | "ref" | "return" | "self" | "Self" |
-        "static" | "struct" | "super" | "trait" | "true" | "type" | "unsafe" |
-        "use" | "where" | "while" | "async" | "await" | "dyn" | "abstract" |
-        "become" | "box" | "do" | "final" | "macro" | "override" | "priv" |
-        "typeof" | "unsized" | "virtual" | "yield" | "try")
+    matches!(
+        s,
+        "as" | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "async"
+            | "await"
+            | "dyn"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+            | "try"
+    )
 }
 
 fn hash8(s: &str) -> String {
@@ -449,12 +592,16 @@ fn to_type_name(hint: &str) -> String {
             up = true;
         }
     }
-    if s.is_empty() { s.push('T'); }
+    if s.is_empty() {
+        s.push('T');
+    }
     // Ensure starts with letter or underscore
     if !s.chars().next().unwrap().is_ascii_alphabetic() && s.chars().next().unwrap() != '_' {
         s.insert(0, 'T');
     }
-    if is_rust_keyword(&s) { s.push('_'); }
+    if is_rust_keyword(&s) {
+        s.push('_');
+    }
     s
 }
 
@@ -471,11 +618,15 @@ fn to_field_name(name: &str) -> String {
             last_underscore = true;
         }
     }
-    if out.is_empty() { out.push('_'); }
+    if out.is_empty() {
+        out.push('_');
+    }
     if !out.chars().next().unwrap().is_ascii_alphabetic() && out.chars().next().unwrap() != '_' {
         out.insert(0, '_');
     }
-    if is_rust_keyword(&out) { out.push('_'); }
+    if is_rust_keyword(&out) {
+        out.push('_');
+    }
     out
 }
 
@@ -496,8 +647,12 @@ fn variant_ident_for(lit: &str, used: &mut BTreeSet<String>) -> String {
         out.push_str("V");
     }
     // Must start with non-digit
-    if out.chars().next().unwrap().is_ascii_digit() { out.insert(0, 'V'); }
-    if is_rust_keyword(&out) { out.push('_'); }
+    if out.chars().next().unwrap().is_ascii_digit() {
+        out.insert(0, 'V');
+    }
+    if is_rust_keyword(&out) {
+        out.push('_');
+    }
 
     // Dedup: append short hash when collision occurs.
     if used.contains(&out) {
@@ -508,3 +663,7 @@ fn variant_ident_for(lit: &str, used: &mut BTreeSet<String>) -> String {
     out
 }
 
+fn is_option_type(s: &str) -> bool {
+    let t = s.trim();
+    t.starts_with("Option<") && t.ends_with('>')
+}

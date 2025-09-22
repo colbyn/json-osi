@@ -61,8 +61,15 @@ fn lower_core(u: &U) -> Ty {
     if let Some(arr) = &u.arr {
         if !arr.cols.is_empty() {
             let elems = arr.cols.iter().map(lower_to_ir).collect::<Vec<_>>();
-            let min_items = tuple_min_items(&arr.cols);
             let max_items = arr.cols.len() as u32;
+
+            // 🚩 if exact arity was proven during inference, enforce it here
+            let min_items = if arr.len_min == arr.len_max && arr.len_max > 0 {
+                max_items
+            } else {
+                tuple_min_items(&arr.cols)
+            };
+
             arms.push(Ty::ArrayTuple { elems, min_items, max_items });
         } else {
             arms.push(Ty::ArrayList {
@@ -72,6 +79,7 @@ fn lower_core(u: &U) -> Ty {
             });
         }
     }
+
 
     if let Some(obj) = &u.obj {
         let mut fields: Vec<Field> = obj.fields.iter().map(|(k, f)| Field {
@@ -92,13 +100,20 @@ fn lower_core(u: &U) -> Ty {
 
 // Collapse common unions: X ∪ null → Nullable(X)
 fn simplify_unions(mut arms: Vec<Ty>) -> Ty {
-    // peel out nullability
     let mut had_null = false;
     arms.retain(|t| {
         if matches!(t, Ty::Null) { had_null = true; false } else { true }
     });
-    if arms.len() == 1 && had_null {
-        return Ty::Nullable(Box::new(arms.remove(0)));
+
+    let core = match arms.len() {
+        0 => Ty::Null,
+        1 => arms.remove(0),
+        _ => Ty::OneOf(arms),
+    };
+
+    if had_null {
+        Ty::Nullable(Box::new(core))
+    } else {
+        core
     }
-    Ty::OneOf(arms)
 }
