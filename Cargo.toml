@@ -19,3 +19,5 @@ jaq-core = "2.2"
 jaq-std  = "2.1"
 jaq-json = { version = "1.1", features = ["serde_json"] }
 rayon = "1.10"
+grex = "1.4.5"
+colored = "3.0.0"

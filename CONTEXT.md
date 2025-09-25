@@ -136,24 +136,23 @@ Naming:
 
 ## 7) CLI surface (`cli.rs`)
 
-Subcommands:
-- `schema` → emit JSON-Schema-ish debug view.
-- `rust` → emit strict Rust types.
-
-Shared flags (`InputSettings`):
-- `--ndjson` (present but not used yet)
-- `--json-pointer /path/to/node`
-- `--jq-expr 'jq filter'` (via `jaq`, returns 0+ JSON texts)
-- `-i, --input <paths|globs>...` (required; stdin not yet supported)
-
-Per command:
-- `schema -o <file.json>` (stdout if omitted)
-- `rust --root-type <Name> -o <file.rs>` (stdout if omitted)
+TODO
 
 Input resolution:
 - Glob patterns expanded (`* ? [ {` detection).
 - Literal paths accepted.
-- Each file: read → parse → optional `jq` → apply results to inference.
+- Each file: read → parse → optional `jq` (per-file ETL like phase) → apply results to inference.
+
+Example:
+```
+json-osi gen \
+    -i '.output/browser-recorder/*/www.google.com/search/~q~*/sid!*.search-tbm-map.entities.json' \
+    --jq-expr '.[]' \
+    --rust   .output/schema_entities_epsilon.rs \
+    --schema .output/schema_entities_epsilon.json \
+    --ir-debug .output/schema_entities_epsilon.debug \
+    --track-time
+```
 
 ---
 

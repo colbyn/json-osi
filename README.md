@@ -253,6 +253,23 @@ The corresponding rust data-models as a rust crate can be found: [github.com/col
 
 ---
 
+## TODO: Readme Updates
+
+- New unified output CLI:
+  ```
+  json-osi gen \
+    -i '.output/browser-recorder/*/www.google.com/search/~q~*/sid!*.search-tbm-map.entities.json' \
+    --jq-expr '.[]' \
+    --rust   .output/schema_entities_epsilon.rs \
+    --schema .output/schema_entities_epsilon.json \
+    --ir-debug .output/schema_entities_epsilon.debug \
+    --track-time
+  ```
+- Deserialization fixes 
+
+
+---
+
 ## License
 
 Copyright © 2025 **Colbyn Wadman**. All Rights Reserved.

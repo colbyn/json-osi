@@ -9,14 +9,15 @@
 //! - Join ⊔ is associative/commutative/idempotent → order-independent.
 //! - Strings default to String (tokens → pattern); tiny human enums optional.
 //! - Arrays keep tuple+list evidence together; finalization stays trivial.
-//!
-//! Dependencies (Cargo.toml):
-//!     serde = { version = "1", features = ["derive"] }
-//!     serde_json = "1"
+pub mod str;
+pub mod num;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use serde_json::{Map, Value};
 use ordered_float::OrderedFloat;
+
+pub use str::StrC;
+pub use num::NumC;
 
 // ------------------------------- Policy ---------------------------------- //
 
@@ -39,24 +40,6 @@ pub struct U {
     pub str_: Option<StrC>,
     pub arr: Option<ArrC>,
     pub obj: Option<ObjC>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct NumC {
-    pub lits_f64: BTreeSet<OrderedFloat<f64>>,
-    pub min_f64: OrderedFloat<f64>,
-    pub max_f64: OrderedFloat<f64>,
-    pub saw_int: bool,
-    pub saw_uint: bool,
-    pub saw_float: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct StrC {
-    pub lits: BTreeSet<String>,
-    pub lcp: Option<String>,
-    pub is_uri: bool,
-    // future flags: uuid/ulid/hex/base64url etc.
 }
 
 #[derive(Clone, Debug, Default)]
@@ -141,8 +124,8 @@ pub fn observe_value(v: &Value) -> U {
         Value::String(s) => {
             let mut str_c = StrC::default();
             str_c.lits.insert(s.clone());
-            str_c.lcp = Some(s.clone());
-            str_c.is_uri = looks_like_uri(s);
+            // str_c.lcp = Some(s.clone());
+            str_c.is_uri = str::looks_like_uri(s);
             U { str_: Some(str_c), ..U::default() }
         }
         Value::Array(xs) => observe_array(xs),
@@ -205,13 +188,13 @@ pub fn join(a: &U, b: &U) -> U {
     out.num = match (&a.num, &b.num) {
         (None, None) => None,
         (Some(x), None) | (None, Some(x)) => Some(x.clone()),
-        (Some(x), Some(y)) => Some(join_num(x, y)),
+        (Some(x), Some(y)) => Some(num::join_num(x, y)),
     };
 
     out.str_ = match (&a.str_, &b.str_) {
         (None, None) => None,
         (Some(x), None) | (None, Some(x)) => Some(x.clone()),
-        (Some(x), Some(y)) => Some(join_str(x, y)),
+        (Some(x), Some(y)) => Some(str::join_str(x, y)),
     };
 
     out.arr = match (&a.arr, &b.arr) {
@@ -226,31 +209,6 @@ pub fn join(a: &U, b: &U) -> U {
         (Some(x), Some(y)) => Some(join_obj(x, y)),
     };
 
-    out
-}
-
-fn join_num(a: &NumC, b: &NumC) -> NumC {
-    let mut out = NumC::default();
-    out.lits_f64 = &a.lits_f64 | &b.lits_f64;
-    if out.lits_f64.len() > MAX_NUM_LITS {
-        out.lits_f64.clear(); // cap: treat as tokens → interval only
-    }
-    out.min_f64 = a.min_f64.min(b.min_f64);
-    out.max_f64 = a.max_f64.max(b.max_f64);
-    out.saw_int = a.saw_int || b.saw_int;
-    out.saw_uint = a.saw_uint || b.saw_uint;
-    out.saw_float = a.saw_float || b.saw_float;
-    out
-}
-
-fn join_str(a: &StrC, b: &StrC) -> StrC {
-    let mut out = StrC::default();
-    out.lits = &a.lits | &b.lits;
-    if out.lits.len() > MAX_STR_LITS {
-        out.lits.clear();
-    }
-    out.lcp = lcp_join(a.lcp.as_deref(), b.lcp.as_deref());
-    out.is_uri = a.is_uri && b.is_uri;
     out
 }
 
@@ -334,26 +292,58 @@ pub fn normalize(u: &mut U) {
         }
     }
 
-    // Strings: prefer String with pattern; keep tiny human enums only
+    // Strings: tiny human enums stay; otherwise synthesize regex via grex (URIs skip regex)
     if let Some(str_c) = &mut u.str_ {
-        // recompute lcp from full set for robustness
-        str_c.lcp = lcp_set(str_c.lits.iter().map(|s| s.as_str()));
-        // subsume enum by pattern if lcp strong or uri
-        if let Some(lcp) = &str_c.lcp {
-            let all_match_lcp = str_c.lits.iter().all(|s| s.starts_with(lcp));
-            if (str_c.is_uri || lcp.len() >= LCP_MIN_FOR_PATTERN) && all_match_lcp {
-                str_c.lits.clear(); // pattern covers all → drop enum
-            }
-        }
-        // keep enum only if tiny & human-ish
-        if !str_c.lits.is_empty() {
-            let tiny = str_c.lits.len() <= STRING_ENUM_MAX
-                && str_c.lits.iter().all(|s| s.len() <= STRING_ENUM_MAX_LEN && looks_humanish(s));
-            if !tiny {
-                str_c.lits.clear(); // treat as tokens
+        let tiny = str_c.lits.len() <= STRING_ENUM_MAX
+            && str_c.lits.iter().all(|s| s.len() <= STRING_ENUM_MAX_LEN && str::looks_humanish(s));
+
+        if !tiny {
+            if !str_c.is_uri {
+                // Attempt grex
+                let key_now = str::grex_cache_key(&str_c.lits);
+                if str_c.grex_cache_key != Some(key_now) {
+                    str_c.pattern_synth = str::synth_regex_with_grex(&str_c.lits);
+                    str_c.grex_cache_key = Some(key_now);
+                }
+                // Collapse to plain string if grex didn’t produce a pattern
+                str_c.lits.clear(); // <-- move this out of the `if pattern_synth.is_some()` branch
+            } else {
+                str_c.lits.clear();
             }
         }
     }
+
+    // if let Some(str_c) = &mut u.str_ {
+    //     // Recompute LCP from all literals for robustness (used only as a fallback)
+    //     // str_c.lcp = str::lcp_set(str_c.lits.iter().map(|s| s.as_str()));
+
+    //     if !str_c.lits.is_empty() {
+    //         // Keep small human-ish enums; they’re clearer and safer than regexes.
+    //         let tiny = str_c.lits.len() <= STRING_ENUM_MAX
+    //             && str_c.lits.iter().all(|s| s.len() <= STRING_ENUM_MAX_LEN && str::looks_humanish(s));
+
+    //         if !tiny {
+    //             if !str_c.is_uri {
+    //                 // Only synthesize when the literal set actually changed.
+    //                 let key_now = str::grex_cache_key(&str_c.lits);
+    //                 if str_c.grex_cache_key != Some(key_now) {
+    //                     str_c.pattern_synth = str::synth_regex_with_grex(&str_c.lits);
+    //                     str_c.grex_cache_key = Some(key_now);
+    //                 }
+    //                 // If we successfully learned a bounded regex, drop the enum literals.
+    //                 if str_c.pattern_synth.is_some() {
+    //                     str_c.lits.clear();
+    //                 }
+    //             } else {
+    //                 // URIs → prefer `format:"uri"`, so don't keep bulky enums.
+    //                 str_c.lits.clear();
+    //             }
+    //         }
+    //         // If tiny enum, keep as-is; lowering will emit the enum.
+    //     }
+    // }
+
+
 
     // Arrays: recurse; tuple vs list is a codegen/schema decision
     if let Some(arr) = &mut u.arr {
@@ -379,31 +369,6 @@ pub fn normalize(u: &mut U) {
         }
     }
     // Note: no arm-flattening needed—U already enforces ≤1 per kind.
-}
-
-
-
-
-// fn is_exact_null_u(u: &U) -> bool {
-//     u.nullable
-//         && !u.has_bool
-//         && u.num.is_none()
-//         && u.str_.is_none()
-//         && u.arr.is_none()
-//         && u.obj.is_none()
-// }
-
-fn interval_overlap_fraction(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
-    if !a_min.is_finite() || !a_max.is_finite() || !b_min.is_finite() || !b_max.is_finite() { return 1.0; }
-    let inter_min = a_min.max(b_min);
-    let inter_max = a_max.min(b_max);
-    let inter = (inter_max - inter_min).max(0.0);
-    let union = (a_max - a_min).max(b_max - b_min).max(1e-12);
-    (inter / union).clamp(0.0, 1.0)
-}
-
-fn kind_sig(u: &U) -> (bool, bool, bool, bool, bool) {
-    (u.has_bool, u.num.is_some(), u.str_.is_some(), u.arr.is_some(), u.obj.is_some())
 }
 
 /// Return true if we have *proof* this is a tuple:
@@ -466,29 +431,36 @@ pub fn emit_schema(u: &U) -> serde_json::Value {
         arms.push(o);
     }
 
-
     // ---- string arm ----
     if let Some(str_c) = &u.str_ {
         let mut o = serde_json::json!({ "type": "string" });
 
         if !str_c.lits.is_empty() {
-            // Prefer enum; skip pattern when enum exists.
+            // Prefer enum when tiny; (normalize already prunes non-tiny)
             o["enum"] = serde_json::Value::Array(
                 str_c.lits.iter().cloned().map(serde_json::Value::from).collect()
             );
-        } else if let Some(lcp) = &str_c.lcp {
-            // Only emit a pattern if the prefix is "strong enough".
-            if lcp.len() >= LCP_MIN_FOR_PATTERN {
-                let pat = if lcp.len() > 80 { &lcp[..80] } else { lcp.as_str() };
-                o["pattern"] = serde_json::Value::from(format!("^{}.*", escape_regex(pat)));
-            }
+        } else if let Some(rx) = &str_c.pattern_synth {
+            // Prefer grex-synth pattern when present (already anchored).
+            o["pattern"] = serde_json::Value::from(rx.clone());
         }
+        
+        // else if let Some(lcp) = &str_c.lcp {
+        //     // Fallback: LCP with restricted tail (never naked dot-star)
+        //     if lcp.chars().count() >= LCP_MIN_FOR_PATTERN {
+        //         // Limit by character count to avoid slicing mid–codepoint
+        //         let lcp_short: String = lcp.chars().take(80).collect();
+        //         o["pattern"] = serde_json::Value::from(
+        //             format!("^{}[A-Za-z0-9._%+\\-]*$", str::escape_regex(&lcp_short))
+        //         );
+        //     }
+        // }
+
         if str_c.is_uri {
             o["format"] = serde_json::Value::from("uri");
         }
         arms.push(o);
     }
-
 
     // ---- boolean arm ----
     if u.has_bool {
@@ -607,76 +579,6 @@ where
 
 // ------------------------------- Utilities -------------------------------- //
 
-fn lcp_join(a: Option<&str>, b: Option<&str>) -> Option<String> {
-    match (a, b) {
-        (Some(x), Some(y)) => {
-            let mut out = String::new();
-            for (cx, cy) in x.chars().zip(y.chars()) {
-                if cx == cy { out.push(cx); } else { break; }
-            }
-            if out.is_empty() { None } else { Some(out) }
-        }
-        (Some(x), None) => Some(x.to_string()),
-        (None, Some(y)) => Some(y.to_string()),
-        (None, None) => None,
-    }
-}
-
-fn lcp_set<'a, I>(mut it: I) -> Option<String>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let first = it.next()?;
-    let mut acc = first.to_string();
-    for s in it {
-        acc = lcp_join(Some(&acc), Some(s)).unwrap_or_default();
-        if acc.is_empty() { return Some(String::new()); }
-    }
-    Some(acc)
-}
-
-pub fn escape_regex(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' |
-            '{' | '}' | '|' | '\\' => { out.push('\\'); out.push(c); }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-fn looks_like_uri(s: &str) -> bool {
-    s.starts_with("http://") || s.starts_with("https://")
-        || s.starts_with("mailto:") || s.starts_with("tel:")
-}
-
-fn looks_humanish(s: &str) -> bool {
-    // lightweight: letters/digits/space/dash/underscore and not too long
-    s.len() <= STRING_ENUM_MAX_LEN &&
-    s.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_')
-}
-
-fn is_exact_null(u: &U) -> bool {
-    u.nullable
-        && !u.has_bool
-        && u.num.is_none()
-        && u.str_.is_none()
-        && u.arr.is_none()
-        && u.obj.is_none()
-}
-
-// pub fn tuple_min_items(cols: &[U]) -> u32 {
-//     // last index that is required: either non-nullable OR exactly-null
-//     let mut last_req: i32 = -1;
-//     for (i, c) in cols.iter().enumerate() {
-//         if !c.nullable || is_exact_null(c) {
-//             last_req = i as i32;
-//         }
-//     }
-//     if last_req < 0 { 0 } else { (last_req as u32) + 1 }
-// }
 
 pub fn tuple_min_items_arr(arr: &ArrC) -> u32 {
     let mut last_req: i32 = -1;
@@ -688,9 +590,6 @@ pub fn tuple_min_items_arr(arr: &ArrC) -> u32 {
     }
     if last_req < 0 { 0 } else { (last_req as u32) + 1 }
 }
-
-
-
 
 
 // ------------------------------- Tests ------------------------------------ //
@@ -723,16 +622,6 @@ mod tests {
     }
 
     #[test]
-    fn strings_tokens_become_pattern() {
-        let s1 = Value::String("0ahUKE-abc123".into());
-        let s2 = Value::String("0ahUKE-xyz456".into());
-        let u = infer_from_values([&s1, &s2]);
-        let str_c = u.str_.unwrap();
-        assert!(str_c.lits.is_empty());
-        assert!(str_c.lcp.unwrap().starts_with("0ahUKE-"));
-    }
-
-    #[test]
     fn tiny_human_enum_stays_enum() {
         let s1 = Value::String("on".into());
         let s2 = Value::String("off".into());
@@ -740,21 +629,6 @@ mod tests {
         let str_c = u.str_.unwrap();
         assert_eq!(str_c.lits.len(), 2);
     }
-
-    // TODO: BROKEN NEEDS UPDATE OR REMOVE
-    // #[test]
-    // fn arrays_tuple_optional_tail() {
-    //     let a = serde_json::json!([1, "x"]);
-    //     let b = serde_json::json!([2]);
-    //     let u = infer_from_values([&a, &b]);
-    //     let arr = u.arr.unwrap();
-    //     assert_eq!(arr.len_min, 1);
-    //     assert_eq!(arr.len_max, 2);
-    //     assert_eq!(arr.cols.len(), 2);
-    //     // column 0 has numbers, column 1 is nullable because it's missing in some samples
-    //     assert!(arr.cols[0].num.is_some());
-    //     assert!(arr.cols[1].nullable);
-    // }
 
     #[test]
     fn objects_merge_and_requiredness_non_null() {
@@ -883,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn arrays_tuple_decision_and_minitems_rules() {
+    fn arrays_tuple_decision_and_min_items_rules() {
         use serde_json::json;
         // A) Variable length, no pad => list
         let a = json!([[1,"x"], [2]]);
@@ -901,6 +775,7 @@ mod tests {
             assert!(!arr.cols.is_empty(), "kept as tuple due to hard null pad");
             let schema = crate::inference::emit_schema(&ub);
             let tuple = schema.get("prefixItems").unwrap(); // root is array only
+            let _ = tuple; // TODO: SHOULD THIS BE READ?
             assert!(schema["minItems"].as_u64().unwrap() < schema["maxItems"].as_u64().unwrap());
         }
 
@@ -915,7 +790,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn grex_prefix_truncation_survives_utf8() {
+        use std::collections::BTreeSet;
+        let mut set = BTreeSet::new();
+        set.insert("näïve-αβγ-001".to_string());
+        set.insert("näïve-αβγ-002".to_string());
+        set.insert("näïve-αβγ-003".to_string());
+        // Prior to the fix this could panic inside trim_common_prefix → truncate.
+        let _rx = str::synth_regex_with_grex(&set);
+    }
 
+    #[test]
+    fn schema_lcp_truncation_survives_utf8() {
+        let a = serde_json::Value::String("https://例え.テスト/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        let b = serde_json::Value::String("https://例え.テスト/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab".into());
+        let u = super::infer_from_values([&a, &b]);
+        let _schema = super::emit_schema(&u); // should not panic
+    }
 }
 
 

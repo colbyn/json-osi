@@ -36,6 +36,8 @@ use serde::de::{Error as DeError};
         );
         self.out
             .push_str("use once_cell::sync::Lazy;\nuse regex::Regex;\n\n");
+        self.out
+            .push_str("use serde_json as sj;\nuse serde_path_to_error as spte;\n\n");
     }
 
     fn emit_null_type(&mut self) {
@@ -97,30 +99,86 @@ impl<'de> Deserialize<'de> for Null {
                 // 1) Materialize child type names
                 let mut fields = Vec::with_capacity(elems.len());
                 for (i, e) in elems.iter().enumerate() {
+                    // Emit the child type string
                     let mut child = self.walk(e, &mut path_with(path, i), format!("{hint}{i}"));
-                    // For optional tail positions (i >= min_items), ensure the field type is Option<...>
-                    if (i as u32) >= *min_items && !is_option_type(&child) {
+
+                    // Column is considered optional if:
+                    //  - it’s past min_items (optional tail), OR
+                    //  - the column itself was inferred nullable (Ty::Nullable)
+                    let col_nullable = matches!(e, Ty::Nullable(_));
+                    if (((i as u32) >= *min_items) || col_nullable) && !is_option_type(&child) {
                         child = format!("Option<{child}>");
                     }
                     fields.push(child);
                 }
 
-                // 2) Exact-arity tuples: derive Deserialize as before
+                // 2) Exact-arity tuples
                 if min_items == max_items {
-                    self.out.push_str(&format!(
-                        "/// tuple len={} (required first {} slots)\n",
-                        max_items, min_items
-                    ));
-                    self.out.push_str(&format!(
-                        "#[derive(Debug, Deserialize)]\npub struct {}(\n",
-                        type_name
-                    ));
-                    for f in &fields {
-                        self.out
-                            .push_str(&format!("    pub {},\n", wrap_tuple_field(f)));
+                    if *max_items == 1 {
+                        // ---- special case: singleton array ----
+                        self.out.push_str(&format!(
+            "/// tuple len=1 (required exactly 1 element)\n#[derive(Debug)]\npub struct {}(\n",
+            type_name
+        ));
+                        for f in &fields {
+                            self.out
+                                .push_str(&format!("    pub {},\n", wrap_tuple_field(f)));
+                        }
+                        self.out.push_str(");\n\n");
+
+                        self.out.push_str(&format!(
+                            r#"impl<'de> serde::Deserialize<'de> for {name} {{
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {{
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {{
+            type Value = {name};
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {{
+                write!(f, "array of length 1")
+            }}
+            fn visit_seq<A>(self, mut seq: A) -> Result<{name}, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {{
+                // read exactly one element of the declared type
+                let a0: {t0} = match seq.next_element::<{t0}>()? {{
+                    Some(v) => v,
+                    None => return Err(serde::de::Error::invalid_length(0, &"exactly 1 element")),
+                }};
+                // reject extras
+                if let Some::<serde_json::Value>(_extra) = seq.next_element()? {{
+                    return Err(serde::de::Error::invalid_length(usize::MAX, &"exactly 1 element"));
+                }}
+                Ok({name}(a0))
+            }}
+        }}
+        de.deserialize_seq(V)
+    }}
+}}
+"#,
+                            name = type_name,
+                            t0 = &fields[0],
+                        ));
+                        return type_name;
+                    } else {
+                        // ---- regular exact-arity (>=2) tuple: derive works fine ----
+                        self.out.push_str(&format!(
+                            "/// tuple len={} (required first {} slots)\n",
+                            max_items, min_items
+                        ));
+                        self.out.push_str(&format!(
+                            "#[derive(Debug, Deserialize)]\npub struct {}(\n",
+                            type_name
+                        ));
+                        for f in &fields {
+                            self.out
+                                .push_str(&format!("    pub {},\n", wrap_tuple_field(f)));
+                        }
+                        self.out.push_str(");\n\n");
+                        return type_name;
                     }
-                    self.out.push_str(");\n\n");
-                    return type_name;
                 }
 
                 // 3) Lenient tuples (optional tail): custom Deserialize
@@ -252,30 +310,79 @@ impl<'de> Deserialize<'de> for Null {
     }
 
     fn emit_union_enum(&mut self, name: &str, variants: &[String], tys: &[String]) {
-        self.out
-            .push_str(&format!("#[derive(Debug)]\npub enum {} {{\n", name));
-        for (v, t) in variants.iter().zip(tys.iter()) {
-            self.out.push_str(&format!("    {}({}),\n", v, t));
-        }
-        self.out.push_str("}\n\n");
-
-        // strict tagless union: try each arm in order
-        self.out.push_str(&format!(
-            r#"impl<'de> Deserialize<'de> for {name} {{
-    fn deserialize<D>(de: D) -> Result<Self, D::Error> where D: Deserializer<'de> {{
-        // deserialize into a serde_json::Value once, then attempt each arm (strict)
-        let val = serde_json::Value::deserialize(de)?;
-"#
-        ));
-        for (idx, t) in tys.iter().enumerate() {
-            self.out.push_str(&format!(
-                "        if let Ok(x) = <{t} as serde::Deserialize>::deserialize(val.clone()) {{ return Ok({name}::{v}(x)); }}\n",
-                t=t, name=name, v=variants[idx]
-            ));
-        }
-        self.out
-            .push_str("        Err(DeError::custom(\"no union arm matched\"))\n    }\n}\n\n");
+    // 1) The enum shell
+    self.out
+        .push_str(&format!("#[derive(Debug)]\npub enum {} {{\n", name));
+    for (v, t) in variants.iter().zip(tys.iter()) {
+        self.out.push_str(&format!("    {}({}),\n", v, t));
     }
+    self.out.push_str("}\n\n");
+
+    // 2) Tagless union deserializer: try each arm using serde_path_to_error,
+    //    collecting ALL failures with their JSON paths.
+    self.out.push_str(&format!(
+        r#"impl<'de> Deserialize<'de> for {name} {{
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {{
+        // Parse once into a generic JSON value
+        let val = sj::Value::deserialize(de)?;
+
+        // Collect detailed arm errors (variant, rust_type, path, inner_msg)
+        let mut errs: Vec<(usize, &'static str, String, String)> = Vec::new();
+
+"#,
+        name = name
+    ));
+
+    for (idx, (v, t)) in variants.iter().zip(tys.iter()).enumerate() {
+        // For stable compile-time & nicer messages, bake the type name as a &'static str.
+        self.out.push_str(&format!(
+            r#"        // ---- try arm {idx}: {t} ----
+        {{
+            // Deserialize {t} from the existing Value, with path tracking
+            let mut de = sj::Deserializer::from_value(val.clone());
+            match spte::deserialize::<{t}, _>(&mut de) {{
+                Ok(x) => return Ok({name}::{v}(x)),
+                Err(err) => {{
+                    let path = err.path().to_string();
+                    let msg  = err.into_inner().to_string();
+                    errs.push(({idx}, "{t}", path, msg));
+                }}
+            }}
+        }}
+"#,
+            idx = idx,
+            t = t,
+            name = name,
+            v = v
+        ));
+    }
+
+    // Build a helpful multi-line error message
+    self.out.push_str(
+        r#"        // Nothing matched → format a comprehensive error
+        if errs.is_empty() {
+            return Err(DeError::custom("no union arm matched (no errors captured)"));
+        }
+
+        // Pretty aggregate: include index, rust type, JSON path, and inner error
+        let mut s = String::from("no union arm matched:\n");
+        for (idx, ty, path, msg) in errs {
+            if path.is_empty() {
+                s.push_str(&format!("  - arm {idx} ({ty}) → {msg}\n"));
+            } else {
+                s.push_str(&format!("  - arm {idx} ({ty}) at {path} → {msg}\n"));
+            }
+        }
+        Err(DeError::custom(s))
+    }}
+}}
+"#,
+    );
+}
+
 
     fn emit_int_newtype(&mut self, t: &Ty, _path: &mut Vec<String>, hint: &str) -> String {
         let Ty::Integer { min, max } = t else {

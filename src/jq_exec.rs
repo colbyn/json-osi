@@ -49,17 +49,3 @@ fn format_undefined_errors(
     }
     anyhow::anyhow!(s)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // TODO: BROKEN NEEDS UPDATE
-
-    // #[test]
-    // fn basic() {
-    //     let input = serde_json::json!({ "foo": { "bar": 42 } });
-    //     let out = run_jaq(".foo.bar", &input).unwrap();
-    //     assert_eq!(out, vec![serde_json::json!(42)]);
-    // }
-}
