@@ -21,7 +21,7 @@ pub use num::NumC;
 
 // ------------------------------- Policy ---------------------------------- //
 
-const LCP_MIN_FOR_PATTERN: usize = 3;      // promote to pattern if lcp ≥ this
+// const LCP_MIN_FOR_PATTERN: usize = 3;      // promote to pattern if lcp ≥ this
 const STRING_ENUM_MAX: usize = 8;          // small, human-ish enum threshold
 const STRING_ENUM_MAX_LEN: usize = 16;      // max literal length for enum
 const KEEP_NUM_ATOMS_OUTSIDE_INTERVAL: bool = false; // simplest: widen

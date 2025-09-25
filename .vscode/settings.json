@@ -13,6 +13,7 @@
         "idents",
         "indexmap",
         "integerish",
+        "näïve",
         "newtype",
         "overfit",
         "overfitting",

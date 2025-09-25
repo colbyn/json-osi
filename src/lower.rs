@@ -12,7 +12,7 @@ fn is_exact_null(u: &crate::inference::U) -> bool {
 
 
 // Utility: gate tiny prefix patterns
-const LCP_MIN_FOR_PATTERN: usize = 3;
+// const LCP_MIN_FOR_PATTERN: usize = 3;
 
 pub fn lower_to_ir(u: &U) -> Ty {
     if is_exact_null(u) {
