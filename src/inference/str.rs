@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+
 #[derive(Clone, Debug, Default)]
 pub struct StrC {
     pub lits: BTreeSet<String>,
@@ -21,11 +22,11 @@ const GREX_MIN_SAMPLES: usize = 3;
 
 /// Hard cap on the length of a generated regex. If grex exceeds this,
 /// we treat the field as an arbitrary string (no pattern).
-const GREX_MAX_PATTERN_LEN: usize = 512;
+const GREX_MAX_PATTERN_LEN: usize = 256;
 
 /// Guard against regexes that are basically giant whitelists made of many
 /// alternations. This is a coarse, top-level `|` count threshold.
-const GREX_MAX_ALTS: usize = 64;
+const GREX_MAX_ALTS: usize = 32;
 
 
 /// Compute a cheap, deterministic fingerprint of the current literal set.
@@ -64,6 +65,10 @@ fn too_many_alternations(rx: &str) -> bool {
 /// - Guardrails: drop result if too long or too alternation-heavy.
 pub fn synth_regex_with_grex(samples: &BTreeSet<String>) -> Option<String> {
     use grex::RegExpBuilder;
+    
+    if !super::ENABLE_GREX {
+        return None; // hard-disable pattern generation
+    }
 
     if samples.len() < GREX_MIN_SAMPLES {
         return None;
@@ -92,15 +97,17 @@ pub fn synth_regex_with_grex(samples: &BTreeSet<String>) -> Option<String> {
     Some(rx)
 }
 
-pub fn join_str(a: &StrC, b: &StrC) -> StrC {
-    let mut out = StrC::default();
-    out.lits = &a.lits | &b.lits;
-    if out.lits.len() > super::MAX_STR_LITS {
-        out.lits.clear();
+impl StrC {
+    pub(super) fn join(a: &Self, b: &Self) -> Self {
+        let mut out = StrC::default();
+        out.lits = &a.lits | &b.lits;
+        if out.lits.len() > super::MAX_STR_LITS {
+            out.lits.clear();
+        }
+        // out.lcp = lcp_join(a.lcp.as_deref(), b.lcp.as_deref());
+        out.is_uri = a.is_uri && b.is_uri;
+        out
     }
-    // out.lcp = lcp_join(a.lcp.as_deref(), b.lcp.as_deref());
-    out.is_uri = a.is_uri && b.is_uri;
-    out
 }
 
 fn lcp_join(a: Option<&str>, b: Option<&str>) -> Option<String> {
@@ -129,21 +136,11 @@ pub fn lcp_set<'a, I>(mut it: I) -> Option<String> where I: Iterator<Item = &'a 
 }
 
 pub fn escape_regex(s: &str) -> String {
-    // let mut out = String::with_capacity(s.len());
-    // for c in s.chars() {
-    //     match c {
-    //         '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' |
-    //         '{' | '}' | '|' | '\\' => { out.push('\\'); out.push(c); }
-    //         _ => out.push(c),
-    //     }
-    // }
-    // out
     regex::escape(s)
 }
 
 pub fn looks_like_uri(s: &str) -> bool {
-    s.starts_with("http://") || s.starts_with("https://")
-        || s.starts_with("mailto:") || s.starts_with("tel:")
+    s.starts_with("http://") || s.starts_with("https://") || s.starts_with("mailto:") || s.starts_with("tel:")
 }
 
 pub fn looks_humanish(s: &str) -> bool {

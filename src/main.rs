@@ -1,9 +1,9 @@
+pub mod cli;
+pub mod codegen;
 pub mod inference;
 pub mod ir;
-pub mod lower;
-pub mod codegen;
-pub mod cli;
 pub mod jq_exec;
+pub mod norm_ir;
 pub mod path_de;
 
 use serde_json::{json, Value};
@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 /// - Homogeneous lists (arrays of scalars), sometimes with nulls
 ///
 /// Tuple layout we’re pretending to reverse-engineer.
+#[allow(unused)]
 fn realistic_samples() -> Vec<Value> {
     vec![
         // --- Tuple records (heterogeneous arrays with null padding) ---
@@ -83,43 +84,6 @@ fn realistic_samples() -> Vec<Value> {
             null
         ]),
     ]
-}
-
-#[allow(unused)]
-fn run_basic_test_samples() {
-    // 1) build state from your realistic samples
-    let samples = realistic_samples(); // your function
-    {
-        let mut inf = inference::Inference::new();
-        for v in &samples { inf.observe_value(v); }
-        let u = inf.solve();
-        
-        // 2) lower to typed IR
-        let ir_root = lower::lower_to_ir(&u);
-        
-        // 3) generate strict Rust types
-        let mut cg = codegen::Codegen::new();
-        cg.emit(&ir_root, "Root");
-        let rust_src = cg.into_string();
-        
-        // 4) print (or write to file)
-        println!("{}", rust_src);
-    }
-    // {
-    //     eprintln!("—— testing deserialization ——");
-    //     for entry in &samples {
-    //         let json_source = serde_json::to_string_pretty(entry).unwrap();
-    //         let payload = serde_json::from_str::<crate::models::Root>(&json_source);
-    //         let payload = match payload {
-    //             Ok(x) => x,
-    //             Err(error) => {
-    //                 eprintln!("❌ failed: {error}");
-    //                 continue;
-    //             }
-    //         };
-    //         eprintln!("✅ success");
-    //     }
-    // }
 }
 
 

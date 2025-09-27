@@ -1,3 +1,7 @@
+# TODO 
+
+This documentation is a best effort WIP that isn't fully up-to-date with the current project implementation.
+
 # JSON Obfuscated Schema Inference & Code Generator
 
 | CodeGen | Supported | Deserialization Support |

@@ -3,6 +3,14 @@ name = "json-osi"
 version = "0.1.0"
 edition = "2024"
 
+# [lib]
+# name = "json_osi"        # code uses `json_osi::...`
+# path = "src/lib.rs"
+
+[[bin]]
+name = "json-osi"        # your CLI
+path = "src/main.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"]}
@@ -21,3 +29,15 @@ jaq-json = { version = "1.1", features = ["serde_json"] }
 rayon = "1.10"
 grex = "1.4.5"
 colored = "3.0.0"
+chrono = "0.4.42"
+
+[workspace]
+members = [".", "dev-test-runner"]
+
+[[example]]
+name = "samples"
+path = "examples/samples.rs"
+
+[[example]]
+name = "complex_singletons"
+path = "examples/complex_singletons.rs"

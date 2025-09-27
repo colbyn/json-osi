@@ -1,3 +1,7 @@
+# TODO 
+
+This documentation is a best effort WIP that isn't fully up-to-date with the current project implementation.
+
 # Evidence-Driven Schema Inference → Typed IR → Strict Rust
 
 This is the high-level map for future-you (or a careful AI). It explains what the tool does, why it’s strict, and where to adjust policies without derailing rigor.

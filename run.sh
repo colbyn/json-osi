@@ -7,5 +7,4 @@ cargo run --release -- gen \
     --jq-expr '.[]' \
     --rust   .output/cg/latest.rs \
     --schema .output/cg/latest.json \
-    --ir-debug .output/cg/latest.debug \
-    --track-time
+    --ir-debug .output/cg/latest.debug
